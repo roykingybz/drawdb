@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Tabs, TabPane } from "@douyinfe/semi-ui";
 import { IconCode, IconList } from "@douyinfe/semi-icons";
 import { IconTable, IconRelationship } from "../../icons";
@@ -12,6 +12,7 @@ import {
   useEnums,
   useTypes,
   useSettings,
+  useViews,
 } from "../../hooks";
 import { useTranslation } from "react-i18next";
 import RelationshipsTab from "./RelationshipsTab/RelationshipsTab";
@@ -20,6 +21,7 @@ import Issues from "./Issues";
 import AreasTab from "./AreasTab/AreasTab";
 import NotesTab from "./NotesTab/NotesTab";
 import TablesTab from "./TablesTab/TablesTab";
+import ViewsTab from "./ViewsTab/ViewsTab";
 import { databases } from "../../data/databases";
 import EnumsTab from "./EnumsTab/EnumsTab";
 import { isRtl } from "../../i18n/utils/rtl";
@@ -35,7 +37,9 @@ export default function SidePanel({ width, resize, setResize }) {
   const { notesCount } = useNotes();
   const { typesCount } = useTypes();
   const { enumsCount } = useEnums();
+  const { viewsCount } = useViews();
   const { t } = useTranslation();
+  const [dbmlProblems, setDbmlProblems] = useState([]);
 
   const tabList = useMemo(() => {
     const tabs = [
@@ -43,6 +47,11 @@ export default function SidePanel({ width, resize, setResize }) {
         tab: `${t("tables")} (${tablesCount})`,
         itemKey: Tab.TABLES,
         component: <TablesTab />,
+      },
+      {
+        tab: `${t("views")} (${viewsCount})`,
+        itemKey: Tab.VIEWS,
+        component: <ViewsTab />,
       },
       {
         tab: `${t("relationships")} (${relationshipsCount})`,
@@ -82,6 +91,7 @@ export default function SidePanel({ width, resize, setResize }) {
     t,
     database,
     tablesCount,
+    viewsCount,
     relationshipsCount,
     areasCount,
     typesCount,
@@ -101,7 +111,7 @@ export default function SidePanel({ width, resize, setResize }) {
       >
         <div className="h-full flex-1 overflow-y-auto">
           {layout.dbmlEditor ? (
-            <DBMLEditor />
+            <DBMLEditor onProblemsChange={setDbmlProblems} />
           ) : (
             <Tabs
               type="card"
@@ -168,7 +178,7 @@ export default function SidePanel({ width, resize, setResize }) {
         </div>
         {layout.issues && (
           <div className="mt-auto border-t-2 border-color shadow-inner">
-            <Issues />
+            <Issues dbmlProblems={layout.dbmlEditor ? dbmlProblems : []} />
           </div>
         )}
       </div>

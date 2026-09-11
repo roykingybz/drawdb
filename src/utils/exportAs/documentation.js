@@ -1,6 +1,8 @@
 import { dbToTypes } from "../../data/datatypes";
+import { buildViewSQL, resolveViewColumns } from "../views";
 import { jsonToMermaid } from "./mermaid";
 import { databases } from "../../data/databases";
+import { getRelationshipFields } from "../utils";
 
 function formatMarkdownTable(headers, rows) {
   const allRows = [headers, ...rows];
@@ -74,20 +76,36 @@ export function jsonToDocumentation(obj) {
         ]);
         indexesSection =
           "\n#### Indexes\n" +
-          formatMarkdownTable(["Name", "Unique", "Fields"], indexRows);
+          formatMarkdownTable(["Name", "Unique", "Columns"], indexRows);
+      }
+
+      let uniqueConstraintsSection = "";
+      if ((table.uniqueConstraints || []).length > 0) {
+        const ucRows = table.uniqueConstraints.map((uc) => [
+          uc.name,
+          uc.fields.join(", "),
+        ]);
+        uniqueConstraintsSection =
+          "\n#### Unique constraints\n" +
+          formatMarkdownTable(["Name", "Columns"], ucRows);
       }
 
       return (
         `### ${table.name}\n${table.comment ? table.comment : ""}\n` +
         `${fieldsTable} \n${enums.length > 0 ? "\n#### Enums\n" + enums : ""}\n` +
-        indexesSection
+        indexesSection +
+        uniqueConstraintsSection
       );
     })
     .join("\n");
 
   function relationshipByField(table, relationships, fieldId) {
     return relationships
-      .filter((r) => r.startTableId === table && r.startFieldId === fieldId)
+      .filter(
+        (r) =>
+          r.startTableId === table &&
+          getRelationshipFields(r).some((p) => p.startFieldId === fieldId),
+      )
       .map((rel) => rel.name);
   }
 
@@ -108,18 +126,41 @@ export function jsonToDocumentation(obj) {
       ? obj.types
           .map((type) => {
             const rows = [[type.name, type.fields.map((f) => f.name).join(", "), type.comment ?? ""]];
-            return formatMarkdownTable(["Name", "Fields", "Note"], rows);
+            return formatMarkdownTable(["Name", "Columns", "Note"], rows);
           })
           .join("\n")
       : "";
 
+  const views = obj.views ?? [];
+  const documentationViews = views.length
+    ? views
+        .map((view) => {
+          const columns = resolveViewColumns(view, obj.tables);
+          const columnsTable = columns.length
+            ? formatMarkdownTable(
+                ["Name", "Type", "Source"],
+                columns.map((c) => [c.name, c.type ?? "", c.source ?? ""]),
+              )
+            : "";
+          const sql = buildViewSQL(view, obj.tables, obj.database);
+          return (
+            `### ${view.name}${view.materialized ? " (materialized)" : ""}\n\n` +
+            `${view.comment ? `${view.comment}\n\n` : ""}` +
+            `${columnsTable}${columnsTable ? "\n" : ""}` +
+            `${sql ? `\`\`\`sql\n${sql}\n\`\`\`\n` : ""}`
+          );
+        })
+        .join("\n")
+    : "";
+
   return (
     `# ${obj.title} documentation\n## Summary\n\n- [Introduction](#introduction)\n- [Database Type](#database-type)\n` +
-    `- [Table Structure](#table-structure)\n${documentationSummary}\n- [Relationships](#relationships)\n- [Database Diagram](#database-diagram)\n\n` +
+    `- [Table Structure](#table-structure)\n${documentationSummary}\n- [Relationships](#relationships)\n${views.length > 0 ? `- [Views](#views)\n` : ""}- [Database Diagram](#database-diagram)\n\n` +
     `## Introduction\n\n## Database type\n\n- **Database system:** ` +
     `${databases[obj.database].name}\n## Table structure\n\n${documentationEntities}` +
     `\n## Relationships\n\n${documentationRelationships}\n` +
     `${databases[obj.database].hasTypes && obj.types.length > 0 ? `## Types\n\n` + documentationTypes + `\n\n` : ""}` +
+    `${views.length > 0 ? `## Views\n\n` + documentationViews + `\n` : ""}` +
     `## Database Diagram\n\n\`\`\`mermaid\n${jsonToMermaid(obj)}\n\`\`\``
   );
 }

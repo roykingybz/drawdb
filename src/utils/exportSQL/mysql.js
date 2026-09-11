@@ -1,4 +1,10 @@
-import { escapeQuotes, parseDefault } from "./shared";
+import { appendViews } from "../views";
+import {
+  escapeQuotes,
+  parseDefault,
+  uniqueConstraintClause,
+  getFkColumnNames,
+} from "./shared";
 
 import { dbToTypes } from "../../data/datatypes";
 import { DB } from "../../data/constants";
@@ -7,7 +13,7 @@ function parseType(field) {
   let res = field.type;
 
   if (field.type === "SET" || field.type === "ENUM") {
-    res += `${field.values ? "(" + field.values.map((value) => "'" + value + "'").join(", ") + ")" : ""}`;
+    res += `${field.values ? "(" + field.values.map((value) => "'" + escapeQuotes(String(value)) + "'").join(", ") + ")" : ""}`;
   }
 
   if (
@@ -20,7 +26,7 @@ function parseType(field) {
   return res;
 }
 
-export function toMySQL(diagram) {
+function tablesToMySQL(diagram) {
   return `${diagram.tables
     .map(
       (table) =>
@@ -51,7 +57,7 @@ export function toMySQL(diagram) {
                 .map((f) => `\`${f.name}\``)
                 .join(", ")})`
             : ""
-        }\n)${table.comment ? ` COMMENT='${escapeQuotes(table.comment)}'` : ""};\n${`\n${table.indices
+        }${uniqueConstraintClause(table, (s) => `\`${s}\``)}\n)${table.comment ? ` COMMENT='${escapeQuotes(table.comment)}'` : ""};\n${`\n${table.indices
           .map(
             (i) =>
               `\nCREATE ${i.unique ? "UNIQUE " : ""}INDEX \`${
@@ -68,14 +74,22 @@ export function toMySQL(diagram) {
         (t) => t.id === r.startTableId,
       );
 
-      const { name: endName, fields: endFields } = diagram.tables.find(
-        (t) => t.id === r.endTableId,
+      const endTable = diagram.tables.find((t) => t.id === r.endTableId);
+      const { name: endName } = endTable;
+      const { startColumns, endColumns } = getFkColumnNames(
+        r,
+        { fields: startFields },
+        endTable,
       );
-      return `ALTER TABLE \`${startName}\`\nADD FOREIGN KEY(\`${
-        startFields.find((f) => f.id === r.startFieldId).name
-      }\`) REFERENCES \`${endName}\`(\`${
-        endFields.find((f) => f.id === r.endFieldId).name
-      }\`)\nON UPDATE ${r.updateConstraint.toUpperCase()} ON DELETE ${r.deleteConstraint.toUpperCase()};`;
+      return `ALTER TABLE \`${startName}\`\nADD FOREIGN KEY(${startColumns
+        .map((c) => `\`${c}\``)
+        .join(", ")}) REFERENCES \`${endName}\`(${endColumns
+        .map((c) => `\`${c}\``)
+        .join(", ")})\nON UPDATE ${r.updateConstraint.toUpperCase()} ON DELETE ${r.deleteConstraint.toUpperCase()};`;
     })
     .join("\n")}`;
+}
+
+export function toMySQL(diagram) {
+  return appendViews(tablesToMySQL(diagram), diagram);
 }

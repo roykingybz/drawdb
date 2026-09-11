@@ -7,6 +7,7 @@ import {
   createContext,
   useContext,
 } from "react";
+import { v4 as uuidv4 } from "uuid";
 import ControlPanel from "./EditorHeader/ControlPanel";
 import ExtensionsContext, { Slot } from "../context/ExtensionsContext";
 import Canvas from "./EditorCanvas/Canvas";
@@ -25,6 +26,7 @@ import {
   useTypes,
   useSaveState,
   useEnums,
+  useViews,
   useNavigateWithParams,
 } from "../hooks";
 import FloatingControls from "./FloatingControls";
@@ -33,14 +35,13 @@ import { IconAlertTriangle } from "@douyinfe/semi-icons";
 import { useTranslation } from "react-i18next";
 import { databases } from "../data/databases";
 import { isRtl } from "../i18n/utils/rtl";
-import {
-  useMatch,
-  useParams,
-  useSearchParams,
-} from "react-router-dom";
+import { useMatch, useParams, useSearchParams } from "react-router-dom";
 import { get, SHARE_FILENAME } from "../api/gists";
-import { nanoid } from "nanoid";
 import { mergeCustomTypes } from "../utils/customTypes";
+import {
+  readDismissedBanners,
+  addDismissedBanner,
+} from "../utils/dismissedBanners";
 
 export const IdContext = createContext({
   gistId: "",
@@ -63,7 +64,12 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
   const [showSelectDbModal, setShowSelectDbModal] = useState(false);
   const [showRestoreModal, setShowRestoreModal] = useState(false);
   const [selectedDb, setSelectedDb] = useState("");
+
+  const [diagramSource, setDiagramSource] = useState(null);
+  const [dismissedBanners, setDismissedBanners] =
+    useState(readDismissedBanners);
   const pendingNewIdRef = useRef(null);
+  const loadedIdRef = useRef(null);
   const { layout, setLayout } = useLayout();
   const { settings } = useSettings();
   const { types, setTypes } = useTypes();
@@ -72,6 +78,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
   const { saveState, setSaveState } = useSaveState();
   const { transform, setTransform } = useTransform();
   const { enums, setEnums } = useEnums();
+  const { views, setViews } = useViews();
   const {
     tables,
     relationships,
@@ -93,6 +100,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
   const extensionValues = useContext(ExtensionsContext);
   const extensions = useMemo(() => extensionValues ?? {}, [extensionValues]);
   const cloudOnly = typeof extensions.cloudSave === "function";
+  const cloudLoad = extensions.cloudLoad;
 
   const handleResize = (e) => {
     if (!resize) return;
@@ -100,34 +108,52 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     if (w > SIDEPANEL_MIN_WIDTH) setWidth(w);
   };
 
+  const buildCloudPayload = useCallback(
+    (targetId) => ({
+      diagramId: targetId,
+      database,
+      name: title,
+      gistId: gistId ?? "",
+      lastModified: new Date(),
+      tables,
+      references: relationships,
+      notes,
+      areas,
+      views,
+      pan: transform.pan,
+      zoom: transform.zoom,
+      ...(databases[database].hasEnums && { enums }),
+      ...(databases[database].hasTypes && { types }),
+    }),
+    [
+      database,
+      title,
+      gistId,
+      tables,
+      relationships,
+      notes,
+      areas,
+      views,
+      transform,
+      enums,
+      types,
+    ],
+  );
+
   const save = useCallback(async () => {
     if (searchParams.has("shareId")) {
       searchParams.delete("shareId");
       setSearchParams(searchParams, { replace: true });
     }
 
-    if (cloudOnly) {
-      const isNew = !loadedDiagramId || isTemplate;
+    if (cloudOnly && diagramSource !== "local") {
+      const isNew =
+        !loadedDiagramId || loadedDiagramId === "blank" || isTemplate;
       const targetId = isNew
-        ? (pendingNewIdRef.current ??= crypto.randomUUID())
+        ? (pendingNewIdRef.current ??= uuidv4())
         : loadedDiagramId;
-      const cloudPayload = {
-        diagramId: targetId,
-        database,
-        name: title,
-        gistId: gistId ?? "",
-        lastModified: new Date(),
-        tables,
-        references: relationships,
-        notes,
-        areas,
-        pan: transform.pan,
-        zoom: transform.zoom,
-        ...(databases[database].hasEnums && { enums }),
-        ...(databases[database].hasTypes && { types }),
-      };
       try {
-        await extensions.cloudSave(cloudPayload, { isNew });
+        await extensions.cloudSave(buildCloudPayload(targetId), { isNew });
         if (isNew) {
           pendingNewIdRef.current = null;
           navigate(`/editor/diagrams/${targetId}`, { replace: true });
@@ -147,7 +173,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     }
 
     if (isTemplate || (!loadedDiagramId && !isTemplate && !isDiagram)) {
-      const diagramId = crypto.randomUUID();
+      const diagramId = uuidv4();
       await db.diagrams
         .add({
           diagramId,
@@ -159,6 +185,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
           references: relationships,
           notes: notes,
           areas: areas,
+          views: views,
           pan: transform.pan,
           zoom: transform.zoom,
           loadedFromGistId: loadedFromGistId,
@@ -182,6 +209,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
           references: relationships,
           notes: notes,
           areas: areas,
+          views: views,
           gistId: gistId ?? "",
           pan: transform.pan,
           zoom: transform.zoom,
@@ -196,6 +224,8 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     }
   }, [
     cloudOnly,
+    diagramSource,
+    buildCloudPayload,
     extensions,
     searchParams,
     setSearchParams,
@@ -203,6 +233,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     relationships,
     notes,
     areas,
+    views,
     types,
     title,
     transform,
@@ -218,81 +249,59 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     navigate,
   ]);
 
+  const moveToCloud = useCallback(async () => {
+    if (typeof extensions.cloudSave !== "function" || !loadedDiagramId) return;
+    setSaveState(State.SAVING);
+    try {
+      await extensions.cloudSave(buildCloudPayload(loadedDiagramId), {
+        isNew: true,
+      });
+      await db.diagrams.where("diagramId").equals(loadedDiagramId).delete();
+      setDiagramSource("cloud");
+      if (typeof cloudLoad === "function") {
+        await cloudLoad(loadedDiagramId);
+      }
+      setSaveState(State.SAVED);
+      setLastSaved(new Date().toLocaleString());
+    } catch (err) {
+      console.warn("move to cloud failed:", err);
+      setSaveState(State.ERROR);
+    }
+  }, [
+    extensions,
+    loadedDiagramId,
+    buildCloudPayload,
+    setSaveState,
+    cloudLoad,
+  ]);
+
+  const dismissMoveToCloud = () => {
+    if (!loadedDiagramId) return;
+    setDismissedBanners((prev) =>
+      addDismissedBanner(prev, `move:${loadedDiagramId}`),
+    );
+  };
+
   const load = useCallback(async () => {
-    const loadLatestDiagram = async () => {
-      await db.diagrams
-        .orderBy("lastModified")
-        .last()
-        .then((diagram) => {
-          if (diagram) {
-            if (diagram.database) {
-              setDatabase(diagram.database);
-            } else {
-              setDatabase(DB.GENERIC);
-            }
-            setGistId(diagram.gistId);
-            setLoadedFromGistId(diagram.loadedFromGistId);
-            setTitle(diagram.name);
-            setTables(diagram.tables);
-            setRelationships(diagram.references);
-            setNotes(diagram.notes);
-            setAreas(diagram.areas);
-            setTransform({ pan: diagram.pan, zoom: diagram.zoom });
-            if (databases[database].hasTypes) {
-              if (diagram.types) {
-                setTypes(
-                  diagram.types.map((t) =>
-                    t.id
-                      ? t
-                      : {
-                          ...t,
-                          id: nanoid(),
-                          fields: t.fields.map((f) =>
-                            f.id ? f : { ...f, id: nanoid() },
-                          ),
-                        },
-                  ),
-                );
-              } else {
-                setTypes([]);
-              }
-            }
-            if (databases[database].hasEnums) {
-              setEnums(
-                diagram.enums.map((e) =>
-                  !e.id ? { ...e, id: nanoid() } : e,
-                ) ?? [],
-              );
-            }
-            navigate(`/editor/diagrams/${diagram.diagramId}`, {
-              replace: true,
-            });
-          } else {
-            if (selectedDb === "") setShowSelectDbModal(true);
-          }
-        })
-        .catch((error) => {
-          console.log(error);
-        });
+    const previousLoadedId = loadedIdRef.current;
+    loadedIdRef.current = loadedDiagramId ?? null;
+
+    const fetchDiagram = async (id) => {
+      const localDiagram = await db.diagrams
+        .where("diagramId")
+        .equals(id)
+        .first();
+      if (localDiagram) return { diagram: localDiagram, source: "local" };
+
+      if (typeof cloudLoad === "function") {
+        const cloudDiagram = await cloudLoad(id);
+        if (cloudDiagram) return { diagram: cloudDiagram, source: "cloud" };
+      }
+      return { diagram: null, source: null };
     };
 
-    const loadDiagram = async (id) => {
-      const diagram =
-        typeof extensions.cloudLoad === "function"
-          ? await extensions.cloudLoad(id)
-          : await db.diagrams.where("diagramId").equals(id).first();
-
-      if (!diagram) return;
-
-      if (typeof diagram.canWrite === "boolean") {
-        setLayout((prev) => ({ ...prev, readOnly: !diagram.canWrite }));
-      }
-
-      if (diagram.database) {
-        setDatabase(diagram.database);
-      } else {
-        setDatabase(DB.GENERIC);
-      }
+    const applyDiagramState = (diagram) => {
+      setDatabase(diagram.database || DB.GENERIC);
       setGistId(diagram.gistId);
       setLoadedFromGistId(diagram.loadedFromGistId);
       setTitle(diagram.name);
@@ -300,36 +309,60 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       setRelationships(diagram.references);
       setAreas(diagram.areas);
       setNotes(diagram.notes);
-      setTransform({
-        pan: diagram.pan,
-        zoom: diagram.zoom,
-      });
+      setTransform({ pan: diagram.pan, zoom: diagram.zoom });
+      setTypes(diagram.types ?? []);
+      setEnums(diagram.enums ?? []);
+      setViews(diagram.views ?? []);
+    };
+
+    const resetEditorState = () => {
+      setTables([]);
+      setRelationships([]);
+      setAreas([]);
+      setNotes([]);
+      setTypes([]);
+      setEnums([]);
+      setViews([]);
       setUndoStack([]);
       setRedoStack([]);
-      if (databases[database].hasTypes) {
-        if (diagram.types) {
-          setTypes(
-            diagram.types.map((t) =>
-              t.id
-                ? t
-                : {
-                    ...t,
-                    id: nanoid(),
-                    fields: t.fields.map((f) =>
-                      f.id ? f : { ...f, id: nanoid() },
-                    ),
-                  },
-            ),
-          );
-        } else {
-          setTypes([]);
-        }
+      setTransform({ zoom: 1, pan: { x: 0, y: 0 } });
+      setTitle("Untitled diagram");
+      setGistId("");
+      setLoadedFromGistId("");
+      setLayout((prev) => ({ ...prev, readOnly: false }));
+      setDiagramSource(null);
+    };
+
+    const loadLatestDiagram = async () => {
+      let diagram;
+      try {
+        diagram = await db.diagrams.orderBy("lastModified").last();
+      } catch (error) {
+        console.log(error);
+        return;
       }
-      if (databases[database].hasEnums) {
-        setEnums(
-          diagram.enums.map((e) => (!e.id ? { ...e, id: nanoid() } : e)) ?? [],
-        );
+      if (!diagram) {
+        if (selectedDb === "") setShowSelectDbModal(true);
+        return;
       }
+      setDiagramSource("local");
+      applyDiagramState(diagram);
+      navigate(`/editor/diagrams/${diagram.diagramId}`, { replace: true });
+    };
+
+    const loadDiagram = async (id) => {
+      const { diagram, source } = await fetchDiagram(id);
+      if (!diagram) return;
+
+      setDiagramSource(source);
+      if (source === "local") {
+        setLayout((prev) => ({ ...prev, readOnly: false }));
+      } else if (typeof diagram.canWrite === "boolean") {
+        setLayout((prev) => ({ ...prev, readOnly: !diagram.canWrite }));
+      }
+      applyDiagramState(diagram);
+      setUndoStack([]);
+      setRedoStack([]);
     };
 
     const loadTemplate = async (id) => {
@@ -337,102 +370,48 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
         .where("templateId")
         .equals(id)
         .first();
-
-      if (template) {
-        if (template.database) {
-          setDatabase(template.database);
-        } else {
-          setDatabase(DB.GENERIC);
-        }
-        setTitle(template.title);
-        setTables(template.tables);
-        setRelationships(template.relationships);
-        setAreas(template.subjectAreas);
-        setNotes(template.notes);
-        setTransform({
-          zoom: 1,
-          pan: { x: 0, y: 0 },
-        });
-        setUndoStack([]);
-        setRedoStack([]);
-        if (databases[database].hasTypes) {
-          if (template.types) {
-            setTypes(
-              template.types.map((t) =>
-                t.id
-                  ? t
-                  : {
-                      ...t,
-                      id: nanoid(),
-                      fields: t.fields.map((f) =>
-                        f.id ? f : { ...f, id: nanoid() },
-                      ),
-                    },
-              ),
-            );
-          } else {
-            setTypes([]);
-          }
-        }
-        if (databases[database].hasEnums) {
-          setEnums(
-            template.enums.map((e) => (!e.id ? { ...e, id: nanoid() } : e)) ??
-              [],
-          );
-        }
-      } else {
+      if (!template) {
+        if (previousLoadedId !== loadedIdRef.current) resetEditorState();
         if (selectedDb === "") setShowSelectDbModal(true);
+        return;
       }
+      setDiagramSource(null);
+      setDatabase(template.database || DB.GENERIC);
+      setTitle(template.title);
+      setTables(template.tables);
+      setRelationships(template.relationships);
+      setAreas(template.subjectAreas);
+      setNotes(template.notes);
+      setTransform({ zoom: 1, pan: { x: 0, y: 0 } });
+      setUndoStack([]);
+      setRedoStack([]);
+      setTypes(template.types ?? []);
+      setEnums(template.enums ?? []);
+      setViews(template.views ?? []);
     };
 
     const loadFromGist = async (shareId, diagramId = null) => {
       try {
         const { data } = await get(shareId);
-        const parsedDiagram = JSON.parse(data.files[SHARE_FILENAME].content);
+        const parsed = JSON.parse(data.files[SHARE_FILENAME].content);
+        setDiagramSource(null);
         setUndoStack([]);
         setRedoStack([]);
         setGistId(shareId);
         setLoadedFromGistId(shareId);
-        setDatabase(parsedDiagram.database);
-        setTitle(parsedDiagram.title);
-        setTables(parsedDiagram.tables);
-        setRelationships(parsedDiagram.relationships);
-        setNotes(parsedDiagram.notes);
-        setAreas(parsedDiagram.subjectAreas);
-        setTransform(parsedDiagram.transform);
-        if (databases[parsedDiagram.database].hasTypes) {
-          if (parsedDiagram.types) {
-            setTypes(
-              parsedDiagram.types.map((t) =>
-                t.id
-                  ? t
-                  : {
-                      ...t,
-                      id: nanoid(),
-                      fields: t.fields.map((f) =>
-                        f.id ? f : { ...f, id: nanoid() },
-                      ),
-                    },
-              ),
-            );
-          } else {
-            setTypes([]);
-          }
-        }
-        if (databases[parsedDiagram.database].hasEnums) {
-          setEnums(
-            parsedDiagram.enums.map((e) =>
-              !e.id ? { ...e, id: nanoid() } : e,
-            ) ?? [],
-          );
-        }
-        if (parsedDiagram.customTypes) {
-          mergeCustomTypes(parsedDiagram.customTypes);
-        }
+        setDatabase(parsed.database);
+        setTitle(parsed.title);
+        setTables(parsed.tables);
+        setRelationships(parsed.relationships);
+        setNotes(parsed.notes);
+        setAreas(parsed.subjectAreas);
+        setTransform(parsed.transform);
+        setTypes(parsed.types ?? []);
+        setEnums(parsed.enums ?? []);
+        setViews(parsed.views ?? []);
+        if (parsed.customTypes) mergeCustomTypes(parsed.customTypes);
         if (diagramId) {
-          navigate(`/editor/diagrams/${diagramId}`, {
-            replace: true,
-          });
+          navigate(`/editor/diagrams/${diagramId}`, { replace: true });
         }
       } catch (e) {
         console.log(e);
@@ -445,12 +424,16 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       const existingDiagram = await db.diagrams.get({
         loadedFromGistId: shareId,
       });
-
       await loadFromGist(shareId, existingDiagram?.diagramId || null);
       return;
     }
 
     if (!loadedDiagramId) {
+      if (cloudOnly) {
+        if (previousLoadedId != null) resetEditorState();
+        if (selectedDb === "") setShowSelectDbModal(true);
+        return;
+      }
       await loadLatestDiagram();
       return;
     }
@@ -465,7 +448,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       return;
     }
   }, [
-    extensions,
+    cloudLoad,
     setTransform,
     setRedoStack,
     setUndoStack,
@@ -475,8 +458,8 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     setNotes,
     setTypes,
     setDatabase,
-    database,
     setEnums,
+    setViews,
     selectedDb,
     setSaveState,
     setLayout,
@@ -485,6 +468,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     isDiagram,
     isTemplate,
     loadedDiagramId,
+    cloudOnly,
   ]);
 
   const returnToCurrentDiagram = async () => {
@@ -498,6 +482,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       tables?.length === 0 &&
       areas?.length === 0 &&
       notes?.length === 0 &&
+      views?.length === 0 &&
       types?.length === 0
     )
       return;
@@ -512,6 +497,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     tables?.length,
     areas?.length,
     notes?.length,
+    views?.length,
     types?.length,
     relationships?.length,
     transform.zoom,
@@ -588,6 +574,37 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
               </Button>
             </div>
           )}
+          {(cloudOnly || typeof extensions.moveToCloudUpgrade === "function") &&
+            diagramSource === "local" &&
+            !version &&
+            !dismissedBanners.has(`move:${loadedDiagramId}`) && (
+              <div className="pointer-events-none absolute inset-x-0 top-3 z-50 flex justify-center">
+                <div className="pointer-events-auto flex items-center gap-3 rounded-full border border-blue-300 bg-blue-50 px-5 py-1.5 shadow-md dark:border-sky-900/50 dark:bg-sky-900/30">
+                  <i className="bi bi-hdd" />
+                  <span className="text-sm">
+                    This diagram is stored locally on your browser. Move it to
+                    the cloud?
+                  </span>
+                  <Button
+                    size="small"
+                    theme="solid"
+                    onClick={
+                      cloudOnly ? moveToCloud : extensions.moveToCloudUpgrade
+                    }
+                  >
+                    Move
+                  </Button>
+                  <Button
+                    size="small"
+                    theme="borderless"
+                    type="tertiary"
+                    aria-label="Dismiss"
+                    icon={<i className="bi bi-x-lg" />}
+                    onClick={dismissMoveToCloud}
+                  />
+                </div>
+              </div>
+            )}
           {!(layout.sidebar || layout.toolbar || layout.header) && (
             <div className="fixed right-5 bottom-4">
               <FloatingControls />

@@ -1,8 +1,14 @@
-import { exportFieldComment, getInlineFK, parseDefault } from "./shared";
+import { appendViews } from "../views";
+import {
+  exportFieldComment,
+  getInlineFK,
+  parseDefault,
+  uniqueConstraintClause,
+} from "./shared";
 
 import { dbToTypes } from "../../data/datatypes";
 
-export function toSqlite(diagram) {
+function tablesToSqlite(diagram) {
   return diagram.tables
     .map((table) => {
       const inlineFK = getInlineFK(table, diagram);
@@ -27,9 +33,9 @@ export function toSqlite(diagram) {
           ? `,\n\tPRIMARY KEY(${table.fields
               .filter((f) => f.primary)
               .map((f) => `"${f.name}"`)
-              .join(", ")})${inlineFK !== "" ? ",\n" : ""}`
+              .join(", ")})`
           : ""
-      }${inlineFK}\n);\n${table.indices
+      }${inlineFK !== "" ? ",\n" : ""}${inlineFK}${uniqueConstraintClause(table, (s) => `"${s}"`)}\n);\n${table.indices
         .map(
           (i) =>
             `\nCREATE ${i.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${
@@ -41,4 +47,8 @@ export function toSqlite(diagram) {
         .join("\n")}`;
     })
     .join("\n");
+}
+
+export function toSqlite(diagram) {
+  return appendViews(tablesToSqlite(diagram), diagram);
 }
